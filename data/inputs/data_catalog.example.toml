@@ -1,0 +1,79 @@
+# Example catalog describing the hourly datasets required by FLEXECOM.
+# Copy this file to data_catalog.toml and adjust the paths, formats and
+# column names to match your own data. All paths are resolved relative to
+# the directory that contains this catalog.
+
+[grid_prices]
+file = "prices_grid_2021.csv"
+format = "csv"
+delimiter = ";"
+decimal = "."
+columns = ["PI_pur", "PI_sell"]
+purchase_column = "PI_pur"
+sell_column = "PI_sell"
+
+[pv_generation]
+file = "gen_FV21.csv"
+format = "csv"
+decimal = "."
+columns = ["PV1"]
+capacity_factor_column = "PV1"
+
+[electric_demand]
+file = "sample_load_profiles.csv"
+format = "csv"
+delimiter = ","
+decimal = "."
+
+[thermal_demand]
+file = "thermal_demand_ninja_run4.xlsx"
+format = "xlsx"
+sheet = "Thermal_Load"
+range = "A1:Y8760"
+
+[weekday_pattern]
+file = "weekday21.xlsx"
+format = "xlsx"
+sheet = "weekday"
+range = "A1:C8760"
+
+[temperatures]
+file = "temperatures_valencia.xlsx"
+format = "xlsx"
+sheet = "Hoja3"
+range = "A1:A8760"
+
+[dhw_profile]
+file = "DHW_Residential.csv"
+format = "csv"
+# Single column with 24 hourly water consumption values in litres.
+
+[ev_patterns.EV_o]
+file = "EV_pattern_50.xlsx"
+format = "xlsx"
+sheet = "EV_o"
+range = "A1:AX8760"
+
+[ev_patterns.EV_km]
+file = "EV_pattern_50.xlsx"
+format = "xlsx"
+sheet = "EV_km"
+range = "A1:AX8760"
+
+[ev_patterns.EV_lleg]
+file = "EV_pattern_50.xlsx"
+format = "xlsx"
+sheet = "EV_lleg"
+range = "A1:AX8760"
+
+[ev_patterns.EV_h_sal]
+file = "EV_pattern_50.xlsx"
+format = "xlsx"
+sheet = "EV_h_sal"
+range = "A1:AX8760"
+
+[ev_patterns.EV_SoC_min]
+file = "EV_pattern_50.xlsx"
+format = "xlsx"
+sheet = "EV_SoC_min"
+range = "A1:AX8760"

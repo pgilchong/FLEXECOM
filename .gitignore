@@ -1,0 +1,21 @@
+# Built files
+/Manifest.toml
+
+# Generated documentation
+/docs/build/
+
+# Results
+/results/
+
+# Large data files
+*.jld2
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*~

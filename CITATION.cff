@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+title: "FLEXECOM: Flexible Energy Community Optimisation Model"
+message: "If you use this software, please cite both the software and the associated publication."
+type: software
+authors:
+  - family-names: Manso Burgos
+    given-names: Álvaro
+    email: almanbur@upv.es
+    affiliation: "Universitat Politècnica de València"
+repository-code: "https://github.com/pgilchong/FLEXECOM"
+license: MIT
+version: "0.1.0"
+date-released: "2025-01-01"
+keywords:
+  - energy optimization
+  - renewable energy communities
+  - photovoltaic
+  - battery storage
+  - electric vehicles
+  - heat pumps
+  - Julia
+  - JuMP
+preferred-citation:
+  type: article
+  authors:
+    - family-names: Manso Burgos
+      given-names: Álvaro
+  title: "Flexible energy community optimisation for the Valencian Community"
+  journal: "Applied Energy"
+  year: 2025
+  url: "https://www.sciencedirect.com/science/article/pii/S030626192500902X"
