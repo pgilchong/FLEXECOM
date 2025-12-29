@@ -53,7 +53,8 @@
                         sum(results[:EV_km])
         expected_heat = sum(max.(results[:load_Thermal], 0.0)) * prices.NG_price
         demand_cool = max.(-results[:load_Thermal], 0.0)
-        expected_cool = sum(sum(demand_cool ./ (results[:COP_Cooling] .- 1), dims=1) .* input_data[:PI_pur])
+        # Correct formula: multiply by price per-hour BEFORE summing over time
+        expected_cool = sum(demand_cool ./ (results[:COP_Cooling] .- 1) .* input_data[:PI_pur])
         expected_dhw = sum(results[:DHW_flux]) * prices.NG_price
 
         @test isapprox(only(vec(costs[:elec])), expected_elec, atol=1e-6)

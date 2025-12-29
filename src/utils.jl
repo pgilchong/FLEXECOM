@@ -163,6 +163,9 @@ function export_to_excel(results, financial_results, filename)
         
         # ESCENARIOS sheet (scenario parameters)
         scenario = results[:scenario]
+        J = size(results[:load_DC], 2)  # Number of households
+        # Export Scenario_Pnom as total PV capacity (PV × J) for MATLAB compatibility
+        scenario_pnom = scenario.PV * J
         prices = get(financial_results, :baseline_prices, PRICE_SENSITIVITY_MEANS)
         pv_price = prices.PV_price
         fuel_price = prices.Fuel_price
@@ -170,9 +173,9 @@ function export_to_excel(results, financial_results, filename)
         ev_price = prices.EV_price
         esc_sheet = XLSX.addsheet!(xf, "ESCENARIOS")
         esc_data = DataFrame(
-            Parameter = ["COEF", "PV", "GRID", "BESS_price", "BESS_cap", "EVnum",
+            Parameter = ["COEF", "Scenario_Pnom", "GRID", "BESS_price", "BESS_cap", "EVnum",
                         "ASHP", "DHW", "PV_price", "Fuel_price", "NG_price", "EV_price"],
-            Value = [scenario.COEF, scenario.PV, scenario.GRID, scenario.BESS_price,
+            Value = [scenario.COEF, scenario_pnom, scenario.GRID, scenario.BESS_price,
                     scenario.BESS_cap, scenario.EVnum, scenario.ASHP, scenario.DHW,
                     pv_price, fuel_price, ng_price, ev_price]
         )

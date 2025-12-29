@@ -106,15 +106,17 @@ const PRICE_SENSITIVITY = (
     Fuel_price = (min = 1.20, mean = 1.80, max = 2.40, count = 9),
     NG_price = (min = 0.05, mean = 0.08, max = 0.11, count = 9),
     EV_price = (min = 0.0, mean = 5000.0, max = 10000.0, count = 9),
+    ASHP_price = (min = 0.50, mean = 0.75, max = 1.00, count = 9),  # MATLAB default: 0.75
 )
 
-const PRICE_SENSITIVITY_KEYS = (:PV_price, :Fuel_price, :NG_price, :EV_price)
+const PRICE_SENSITIVITY_KEYS = (:PV_price, :Fuel_price, :NG_price, :EV_price, :ASHP_price)
 
 const PRICE_SENSITIVITY_MEANS = (
     PV_price = PRICE_SENSITIVITY.PV_price.mean,
     Fuel_price = PRICE_SENSITIVITY.Fuel_price.mean,
     NG_price = PRICE_SENSITIVITY.NG_price.mean,
     EV_price = PRICE_SENSITIVITY.EV_price.mean,
+    ASHP_price = PRICE_SENSITIVITY.ASHP_price.mean,
 )
 
 end # module

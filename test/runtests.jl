@@ -1,11 +1,3 @@
-using Pkg
-
-project_root = normpath(joinpath(@__DIR__, ".."))
-Pkg.activate(project_root)
-Pkg.instantiate()
-
-push!(LOAD_PATH, joinpath(project_root, "src"))
-
 using Test
 using FLEXECOM
 

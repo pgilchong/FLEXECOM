@@ -1,7 +1,7 @@
 name = "FLEXECOM"
 uuid = "8d7f05c3-7c9a-4f18-b67a-3e6e4944e9fc"
 authors = ["Álvaro Manso Burgos <almanbur@upv.es>"]
-version = "1.0.0"
+version = "1.1.0"
 
 [deps]
 CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"

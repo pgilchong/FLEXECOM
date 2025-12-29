@@ -30,6 +30,63 @@ using ..Constants
 export calculate_financial_metrics, calculate_npv, calculate_irr, calculate_initial_costs,
        price_sensitivity_values
 
+"""
+    calculate_bess_usage(results, params) -> NamedTuple
+
+Calculate BESS usage metrics based on optimization results.
+
+Uses the MATLAB methodology:
+- BESS_use = total annual charge + discharge (kWh/year)
+- BESS_cycles_yr = BESS_use / (BESS_cap * 2)
+- BESS_life = floor(BESS_Cycles / BESS_cycles_yr)
+
+Returns a NamedTuple with:
+- life: BESS lifetime in years (capped at project horizon N)
+- cycles_yr: Annual cycles used
+- total_cycles: Total available cycles (from BESS specs)
+"""
+function calculate_bess_usage(results, params)
+    scenario = results[:scenario]
+    N = params.N
+
+    # No BESS installed - return default values
+    if scenario.BESS_cap == 0 || !haskey(results, :BESS_cha_pur)
+        return (life = N, cycles_yr = 0.0, total_cycles = 0.0)
+    end
+
+    # Calculate annual usage
+    BESS_cha = get(results, :BESS_cha_pur, zeros(1, 1)) + get(results, :BESS_cha_sc, zeros(1, 1))
+    BESS_dis = get(results, :BESS_dis, zeros(1, 1))
+    BESS_use = sum(BESS_cha) + sum(BESS_dis)
+
+    # Total BESS capacity
+    BESS_cap = results[:BESS_COM].cap * results[:BESS_num]
+
+    # Total available cycles
+    BESS_Cycles = Float64(results[:BESS_COM].Cycles)
+
+    # Cycles per year (full cycle = charge + discharge = 2 * capacity)
+    if BESS_cap <= 0 || BESS_use <= 0
+        return (life = N, cycles_yr = 0.0, total_cycles = BESS_Cycles)
+    end
+    BESS_cycles_yr = BESS_use / (BESS_cap * 2)
+
+    # Calculate lifetime
+    if BESS_cycles_yr > 0
+        bess_life = floor(Int, BESS_Cycles / BESS_cycles_yr)
+    else
+        bess_life = N  # No usage means infinite life
+    end
+
+    # Cap at project horizon
+    return (life = min(bess_life, N), cycles_yr = BESS_cycles_yr, total_cycles = BESS_Cycles)
+end
+
+# Backward compatibility wrapper
+function calculate_bess_lifetime(results, params)
+    return calculate_bess_usage(results, params).life
+end
+
 function _piecewise_range(params)
     min_val = params.min
     mean_val = params.mean
@@ -122,6 +179,10 @@ function calculate_financial_metrics(scenario_results, financial_params, input_d
 
         # Calculate household energy shares
         energy_shares = calculate_energy_shares(results)
+
+        # Calculate actual BESS usage metrics (life, cycles_yr, total_cycles)
+        bess_usage = calculate_bess_usage(results, financial_params)
+
         scenario_df = DataFrame(
             PV_price = Float64[],
             Fuel_price = Float64[],
@@ -143,8 +204,11 @@ function calculate_financial_metrics(scenario_results, financial_params, input_d
             price_values.NG_price,
             price_values.EV_price,
         )
+            # ASHP_price defaults to 1.0 (no multiplier) for MATLAB compatibility
+            # Can be changed for sensitivity analysis if needed
+            ashp_price = PRICE_SENSITIVITY_MEANS.ASHP_price
             prices = (PV_price = pv_price, Fuel_price = fuel_price,
-                      NG_price = ng_price, EV_price = ev_price)
+                      NG_price = ng_price, EV_price = ev_price, ASHP_price = ashp_price)
 
             initial_costs = calculate_initial_costs(results, input_data, scenario, financial_params, prices)
             investments = calculate_investments(results, scenario, financial_params, prices)
@@ -152,9 +216,9 @@ function calculate_financial_metrics(scenario_results, financial_params, input_d
             savings = calculate_savings(results, initial_costs, scenario, input_data)
 
             npv_rec, npv_j, npv_ev = calculate_npv_detailed(
-                investments, operation_costs, savings, energy_shares, financial_params)
+                investments, operation_costs, savings, energy_shares, financial_params, bess_usage)
             irr_rec, irr_j, irr_ev = calculate_irr_detailed(
-                investments, operation_costs, savings, energy_shares, financial_params)
+                investments, operation_costs, savings, energy_shares, financial_params, bess_usage)
 
             push!(scenario_df, (
                 pv_price,
@@ -227,15 +291,16 @@ function calculate_initial_costs(results, input_data, scenario, params, prices)
     K = results[:K]
     ASHP = results[:ASHP]
     DHW = results[:DHW]
-    
-    # Reference prices
-    PI_ref = input_data[:PI_pur]
-    
+
+    # Grid prices with scenario multiplier (MATLAB: PI_Grid = PI_ref × Scenario_Grid)
+    PI_pur = input_data[:PI_pur] .* scenario.GRID
+
     # Calculate electricity costs
-    Cost_Ini_elec_var = sum(results[:load_DC] .* PI_ref, dims=1)
+    # MATLAB: Cost_Ini_elec_var = sum(Demands_elec × PI_Grid, dims=1)
+    Cost_Ini_elec_var = sum(results[:load_DC] .* PI_pur, dims=1)
     Cost_Ini_elec_pow = maximum(results[:load_DC], dims=1) .* params.PI_power
     Cost_Ini_elec = Cost_Ini_elec_var .+ Cost_Ini_elec_pow
-    
+
     # Calculate ICEV costs
     Cost_Ini_ICEV = zeros(1, K)
     if K > 0
@@ -245,34 +310,35 @@ function calculate_initial_costs(results, input_data, scenario, params, prices)
 
     # Calculate thermal demand costs
     thermal_demand = results[:load_Thermal]
-    
+
     # Heating demand (positive values)
     Demand_Heat = zeros(size(thermal_demand))
     Demand_Heat[thermal_demand .> 0] = thermal_demand[thermal_demand .> 0]
-    
+
     # Cooling demand (negative values)
     Demand_Cool = zeros(size(thermal_demand))
     Demand_Cool[thermal_demand .< 0] = -thermal_demand[thermal_demand .< 0]
-    
+
     # Calculate costs with natural gas for heating and inefficient AC for cooling
     Cost_Ini_Heat = sum(Demand_Heat, dims=1) .* prices.NG_price
-    
+
     # Assume inefficient AC has COP of actual COP - 1
+    # MATLAB: Cost_Ini_Cool = Demand_cool / ASHP_ACcop_ini × PI_Grid
     ASHP_ACcop_ini = results[:COP_Cooling] .- 1
-    Cost_Ini_Cool = sum(Demand_Cool ./ ASHP_ACcop_ini, dims=1) .* PI_ref
-    
+    Cost_Ini_Cool = sum(Demand_Cool ./ ASHP_ACcop_ini .* PI_pur, dims=1)
+
     # DHW costs with natural gas
     Cost_Ini_DHW = sum(results[:DHW_flux], dims=1) .* prices.NG_price
-    
+
     # Store all initial costs
     initial_costs[:elec] = Cost_Ini_elec
     initial_costs[:icev] = Cost_Ini_ICEV
     initial_costs[:heat] = Cost_Ini_Heat
     initial_costs[:cool] = Cost_Ini_Cool
     initial_costs[:dhw] = Cost_Ini_DHW
-    initial_costs[:total] = sum(Cost_Ini_elec) + sum(Cost_Ini_ICEV) + sum(Cost_Ini_Heat) + 
+    initial_costs[:total] = sum(Cost_Ini_elec) + sum(Cost_Ini_ICEV) + sum(Cost_Ini_Heat) +
                             sum(sum(Cost_Ini_Cool)) + sum(sum(Cost_Ini_DHW))
-    
+
     return initial_costs
 end
 
@@ -308,10 +374,11 @@ function calculate_investments(results, scenario, params, prices)
     end
     investments[:ev] = inv_ev
     
-    # ASHP investment
+    # ASHP investment (with price multiplier for sensitivity analysis)
     inv_ashp = 0
     if ASHP == 1
-        inv_ashp = ASHP_BASE_PRICE * J
+        ashp_price_mult = haskey(prices, :ASHP_price) ? prices.ASHP_price : 1.0
+        inv_ashp = ASHP_BASE_PRICE * ashp_price_mult * J
     end
     investments[:ashp] = inv_ashp
     
@@ -322,9 +389,11 @@ function calculate_investments(results, scenario, params, prices)
     end
     investments[:dhw] = inv_dhw
     
-    # Total investment
-    investments[:total] = inv_pv + inv_inv + inv_bess + inv_ev + inv_ashp + inv_dhw
-    
+    # Total investment (MATLAB compatibility: inverter NOT included in initial investment,
+    # only added at replacement years - see CV2_Financial line 295)
+    # The inverter is still stored for replacement calculations
+    investments[:total] = inv_pv + inv_bess + inv_ev + inv_ashp + inv_dhw
+
     return investments
 end
 
@@ -374,23 +443,39 @@ end
 
 function calculate_energy_shares(results)
     shares = Dict()
-    
+
     # Get scenario parameters
     scenario = results[:scenario]
     J = size(results[:load_DC], 2)
-    
+
     # Calculate energy share per household
+    # MATLAB formulas from CV2_Financial lines 158-170
     if scenario.PV > 0
         total_allocated = sum(results[:P_allo])
         if isapprox(total_allocated, 0.0; atol=1e-9)
             # Avoid division by zero when there is no allocated energy
             shares[:j] = ones(1, J) / J
         elseif scenario.COEF == 1 || scenario.COEF == 2
-            # For static or variable coefficients use the actually allocated energy
-            shares[:j] = sum(results[:P_allo], dims=1) ./ total_allocated
+            # For static or variable coefficients:
+            # Share_j = sum(P_allo, dims=1) / sum(Generators)
+            total_generation = sum(results[:gen_pow])
+            if isapprox(total_generation, 0.0; atol=1e-9)
+                shares[:j] = ones(1, J) / J
+            else
+                shares[:j] = sum(results[:P_allo], dims=1) ./ total_generation
+            end
         elseif scenario.COEF == 3
-            # For dynamic coefficients the allocated energy already accounts for the surplus
-            shares[:j] = sum(results[:P_allo], dims=1) ./ total_allocated
+            # For dynamic coefficients:
+            # Share_j = sum(P_allo, dims=1) / (sum(Generators) - sum(Generators × Coeff_surplus))
+            # This equals: sum(P_allo, dims=1) / sum(Generators × (1 - Coeff_surplus))
+            gen_pow = results[:gen_pow]
+            Coef_surp = results[:Coef_surp]
+            total_usable_gen = sum(gen_pow .* (1 .- Coef_surp))
+            if isapprox(total_usable_gen, 0.0; atol=1e-9)
+                shares[:j] = ones(1, J) / J
+            else
+                shares[:j] = sum(results[:P_allo], dims=1) ./ total_usable_gen
+            end
         end
     elseif scenario.BESS_cap > 0
         # If no PV but BESS exists, share based on BESS charging
@@ -435,16 +520,23 @@ function calculate_savings(results, initial_costs, scenario, input_data)
     savings_elec = initial_costs[:elec] - elec_costs_rec
     
     # EV savings (difference between ICEV fuel costs and EV electricity costs)
+    # MATLAB: EVk_opex = P_pur_EVk × PI_pur + P_sc_EVk × PI_sell (includes self-consumption compensation)
     savings_ev = zeros(1, K)
-    if K > 0
-        ev_opex = sum(results[:P_pur_EVk] .* PI_pur, dims=1)
-        savings_ev = initial_costs[:icev] - ev_opex
+    if K > 0 && haskey(results, :P_pur_EVk)
+        # EV operating costs include both grid purchases and self-consumption compensation
+        ev_opex_pur = sum(results[:P_pur_EVk] .* PI_pur, dims=1)
+        # Self-consumption compensation (may not exist in all scenarios)
+        ev_opex_sc = haskey(results, :P_sc_EVk) ?
+                     sum(results[:P_sc_EVk] .* PI_sell, dims=1) :
+                     zeros(1, K)
+        ev_opex = ev_opex_pur .+ ev_opex_sc
+        savings_ev = initial_costs[:icev] .- ev_opex
     end
     
     # ASHP savings
     savings_ashp = 0
     if ASHP == 1
-        ashp_opex = sum(sum((results[:W_pur_heating] + results[:W_pur_cooling]) .* 
+        ashp_opex = sum(sum((results[:W_pur_heating] + results[:W_pur_cooling]) .*
                           PI_pur, dims=1))
         savings_ashp = sum(initial_costs[:heat]) + sum(sum(initial_costs[:cool])) - ashp_opex
     end
@@ -457,15 +549,16 @@ function calculate_savings(results, initial_costs, scenario, input_data)
     end
     
     # Calculate PV savings
+    # MATLAB formulas from CV2_Financial lines 312-316
     if scenario.COEF == 1 || scenario.COEF == 2
-        # For static or variable coefficients
-        savings_pv = sum(sum(results[:P_sc], dims=2) .* PI_pur + 
-                       sum(max.(results[:P_sold] - results[:BESS_dis], 0), dims=2) .* 
-                       PI_sell)
+        # Savings_PV = sum(P_sc × PI_pur) + sum(max(P_sold - BESS_dis, 0) × PI_sell)
+        # Sum over households first (dims=2), then multiply by hourly prices, then sum over time
+        savings_pv = sum(sum(results[:P_sc], dims=2) .* PI_pur) +
+                     sum(sum(max.(results[:P_sold] .- results[:BESS_dis], 0), dims=2) .* PI_sell)
     elseif scenario.COEF == 3
-        # For dynamic coefficients
-        savings_pv = sum(sum(results[:gen_pow] .* (1 .- results[:Coef_surp]) .* 
-                          PI_pur))
+        # Savings_PV = sum(Generators × (1 - Coeff_surplus) × PI_pur)
+        # gen_pow is T×1, Coef_surp is T×1, PI_pur is T×1
+        savings_pv = sum(results[:gen_pow] .* (1 .- results[:Coef_surp]) .* PI_pur)
     else
         savings_pv = 0
     end
@@ -481,22 +574,32 @@ function calculate_savings(results, initial_costs, scenario, input_data)
     savings[:dhw] = savings_dhw
     savings[:pv] = savings_pv
     savings[:bess] = savings_bess
-    savings[:total] = sum(savings_elec) + sum(savings_ev) + savings_ashp + savings_dhw
-    
+
+    # MATLAB-compatible total savings (CV2_Financial lines 249-256)
+    # Savings_REC = Cost_Ini_elec + Cost_Ini_Heat*ASHP + Cost_Ini_Cool*ASHP + Cost_Ini_DHW*DHW
+    #             - P_pur_costs - power_costs + Cost_Ini_ICEV - EVk_opex
+    # NOTE: MATLAB does NOT subtract DHW_opex or ASHP_opex from Savings_REC
+    # These operating costs are only used for component attribution (Savings_DHW, Savings_ASHP)
+    savings[:total] = sum(savings_elec) + sum(savings_ev) +
+                      (ASHP == 1 ? sum(initial_costs[:heat]) + sum(sum(initial_costs[:cool])) : 0.0) +
+                      (DHW == 1 ? sum(sum(initial_costs[:dhw])) : 0.0)
+
     return savings
 end
 
 function calculate_investment_shares(investments)
     shares = Dict()
-    
-    total_inv = investments[:total]
-    
-    if total_inv > 0
-        shares[:pv] = (investments[:pv] + investments[:inv]) / total_inv
-        shares[:bess] = investments[:bess] / total_inv
-        shares[:ashp] = investments[:ashp] / total_inv
-        shares[:dhw] = investments[:dhw] / total_inv
-        shares[:ev] = investments[:ev] / total_inv
+
+    # For shares calculation, include inverter in total (MATLAB CV2 line 409-414)
+    # This differs from NPV calculation where inverter is only added at replacements
+    total_inv_with_inv = investments[:total] + investments[:inv]
+
+    if total_inv_with_inv > 0
+        shares[:pv] = (investments[:pv] + investments[:inv]) / total_inv_with_inv
+        shares[:bess] = investments[:bess] / total_inv_with_inv
+        shares[:ashp] = investments[:ashp] / total_inv_with_inv
+        shares[:dhw] = investments[:dhw] / total_inv_with_inv
+        shares[:ev] = investments[:ev] / total_inv_with_inv
     else
         shares[:pv] = 0
         shares[:bess] = 0
@@ -504,123 +607,92 @@ function calculate_investment_shares(investments)
         shares[:dhw] = 0
         shares[:ev] = 0
     end
-    
+
     return shares
 end
 
-function calculate_npv_detailed(investments, operation_costs, savings, energy_shares, params)
+function calculate_npv_detailed(investments, operation_costs, savings, energy_shares, params, bess_usage)
     # Initialize variables
-    N = params.N  # Time horizon
+    N = params.N  # Time horizon (years)
     d = params.d  # Discount rate
     shares_j = vec(energy_shares[:j])
     J = length(shares_j)
     savings_elec = vec(savings[:elec])
-    
-    # Calculate BESS lifetime and replacements
-    bess_cycles_yr = 0
-    bess_life = N
-    if investments[:bess] > 0
-        # Simplified calculation: assume BESS lasts 10 years
-        bess_life = 10
-    end
-    
-    # Initialize NPV arrays
-    npv_inv_rec = zeros(N)
-    npv_inv_j = zeros(N, J)
-    npv_inv_ev = zeros(N)
-    
-    npv_om = zeros(N)
-    npv_om_j = zeros(N, J)
-    npv_om_ev = zeros(N)
-    
-    npv_sav = zeros(N)
-    npv_sav_j = zeros(N, J)
-    npv_sav_ev = zeros(N)
-    
-    # Year 1: Initial investments
-    npv_inv_rec[1] = investments[:total]
-    npv_inv_j[1, :] = (investments[:pv] + investments[:inv] + investments[:bess]) .*
-                      shares_j .+ investments[:ashp] / J .+
-                      investments[:dhw] / J
-    npv_inv_ev[1] = investments[:ev]
-    
-    # Year 1: O&M and savings
-    npv_om[1] = operation_costs[:total] / d * (1 - 1/(1+d))
-    npv_om_j[1, :] = (operation_costs[:pv] + operation_costs[:bess]) .*
-                     shares_j ./ d .* (1 .- 1 ./ (1 .+ d)) .+
-                     operation_costs[:ashp] / J / d * (1 - 1/(1+d)) .+
-                     operation_costs[:dhw] / J / d * (1 - 1/(1+d))
-    npv_om_ev[1] = operation_costs[:ev] / d * (1 - 1/(1+d))
-    
-    npv_sav[1] = savings[:total] / d * (1 - 1/(1+d))
-    npv_sav_j[1, :] = savings_elec ./ d .* (1 .- 1 ./ (1 .+ d))
-    if size(savings[:ev], 2) > 0
-        npv_sav_ev[1] = sum(savings[:ev]) / d * (1 - 1/(1+d))
-    end
-    
-    # Years 2 to N: Account for replacements, O&M, and savings
-    for n = 2:N
-        # Investment replacements
-        if mod(n-1, bess_life) == 0 && mod(n-1, params.INV_life) == 0
-            # Replace both BESS and inverter
-            npv_inv_rec[n] = npv_inv_rec[n-1] + (investments[:bess] + investments[:inv]) / 
-                             (1+d)^n
-            npv_inv_j[n, :] = npv_inv_j[n-1, :] + (investments[:bess] + investments[:inv]) ./
-                              (1+d)^n .* shares_j
-        elseif mod(n-1, bess_life) == 0
-            # Replace only BESS
-            npv_inv_rec[n] = npv_inv_rec[n-1] + investments[:bess] / (1+d)^n
-            npv_inv_j[n, :] = npv_inv_j[n-1, :] + investments[:bess] ./ (1+d)^n .*
-                              shares_j
-        elseif mod(n-1, params.INV_life) == 0
-            # Replace only inverter
-            npv_inv_rec[n] = npv_inv_rec[n-1] + investments[:inv] / (1+d)^n
-            npv_inv_j[n, :] = npv_inv_j[n-1, :] + investments[:inv] ./ (1+d)^n .*
-                              shares_j
-        else
-            # No replacements
-            npv_inv_rec[n] = npv_inv_rec[n-1]
-            npv_inv_j[n, :] = npv_inv_j[n-1, :]
-        end
-        
-        npv_inv_ev[n] = npv_inv_ev[n-1]
-        
-        # O&M and savings NPV
-        npv_om[n] = npv_om[n-1] + operation_costs[:total] / d * (1 - 1/(1+d)^n)
-        npv_om_j[n, :] = npv_om_j[n-1, :] + (operation_costs[:pv] +
-                         operation_costs[:bess]) .* shares_j ./ d .*
-                         (1 .- 1 ./ (1 .+ d).^n) .+
-                         operation_costs[:ashp] / J / d *
-                         (1 - 1/(1+d)^n) .+
-                         operation_costs[:dhw] / J / d *
-                         (1 - 1/(1+d)^n)
-        npv_om_ev[n] = npv_om_ev[n-1] + operation_costs[:ev] / d * (1 - 1/(1+d)^n)
-        
-        npv_sav[n] = npv_sav[n-1] + savings[:total] / d * (1 - 1/(1+d)^n)
-        npv_sav_j[n, :] = npv_sav_j[n-1, :] + savings_elec ./ d .* (1 .- 1 ./ (1 .+ d).^n)
-        
-        if size(savings[:ev], 2) > 0
-            npv_sav_ev[n] = npv_sav_ev[n-1] + sum(savings[:ev]) / d * (1 - 1/(1+d)^n)
+
+    # Annuity present value factor: PV of 1€/year for N years at rate d
+    # PV = (1 - (1+d)^(-N)) / d
+    annuity_factor = (1 - (1+d)^(-N)) / d
+
+    # Extract BESS usage metrics
+    bess_life = bess_usage.life
+    bess_cycles_yr = bess_usage.cycles_yr
+    bess_total_cycles = bess_usage.total_cycles
+
+    # === INITIAL INVESTMENTS (Year 0) ===
+    # MATLAB compatibility: inverter NOT included in year 0 (CV2 lines 295-296)
+    inv_rec = investments[:total]  # Already excludes inverter
+    inv_j = (investments[:pv] + investments[:bess]) .* shares_j .+
+            investments[:ashp] / J .+ investments[:dhw] / J
+    inv_ev = investments[:ev]
+
+    # === REPLACEMENT INVESTMENTS (discounted to present value) ===
+    replacement_inv = 0.0
+    replacement_inv_j = zeros(J)
+
+    # Check for BESS and inverter replacements during project lifetime
+    for year in 1:N
+        replace_bess = (investments[:bess] > 0) && (mod(year, bess_life) == 0) && (year < N)
+        replace_inv = (mod(year, params.INV_life) == 0) && (year < N)
+
+        if replace_bess && replace_inv
+            repl_cost = (investments[:bess] + investments[:inv]) / (1+d)^year
+            replacement_inv += repl_cost
+            replacement_inv_j .+= repl_cost .* shares_j
+        elseif replace_bess
+            repl_cost = investments[:bess] / (1+d)^year
+            replacement_inv += repl_cost
+            replacement_inv_j .+= repl_cost .* shares_j
+        elseif replace_inv
+            repl_cost = investments[:inv] / (1+d)^year
+            replacement_inv += repl_cost
+            replacement_inv_j .+= repl_cost .* shares_j
         end
     end
-    
-    # Calculate BESS residual value at end of project
-    residual_bess = 0
-    if investments[:bess] > 0
-        # Simplified residual value calculation
-        replace_bess = floor(N/bess_life) * bess_life
-        if replace_bess < N
-            residual_bess = investments[:bess] / (1+d)^replace_bess * 
-                           (1 - (N - replace_bess) / bess_life)
+
+    # === BESS RESIDUAL VALUE (at end of project) ===
+    # Uses cycle-based formula matching MATLAB original:
+    # Res_BESS = INV_BESS * (1 - BESS_cycles_yr * years_since_replacement / BESS_Cycles)
+    residual_bess = 0.0
+    if investments[:bess] > 0 && bess_total_cycles > 0
+        last_replacement = floor(Int, N / bess_life) * bess_life
+        years_since_replacement = N - last_replacement
+        if years_since_replacement > 0 && years_since_replacement < bess_life
+            # Cycle-based residual value (faithful to MATLAB design)
+            cycles_used_since_replacement = bess_cycles_yr * years_since_replacement
+            residual_fraction = 1 - cycles_used_since_replacement / bess_total_cycles
+            # Residual value at replacement year, discounted to present
+            residual_bess = investments[:bess] / (1+d)^last_replacement * residual_fraction
+            residual_bess = residual_bess / (1+d)^years_since_replacement
         end
     end
-    
-    # Final NPV calculation
-    npv_rec = npv_sav[N] - npv_om[N] - npv_inv_rec[N] + residual_bess
-    npv_j = npv_sav_j[N, :] - npv_om_j[N, :] - npv_inv_j[N, :] +
-            residual_bess .* shares_j
-    npv_ev = npv_sav_ev[N] - npv_om_ev[N] - npv_inv_ev[N]
-    
+
+    # === O&M COSTS (annual, discounted using annuity factor) ===
+    om_rec = operation_costs[:total] * annuity_factor
+    om_j = ((operation_costs[:pv] + operation_costs[:bess]) .* shares_j .+
+            operation_costs[:ashp] / J .+ operation_costs[:dhw] / J) .* annuity_factor
+    om_ev = operation_costs[:ev] * annuity_factor
+
+    # === SAVINGS (annual, discounted using annuity factor) ===
+    sav_rec = savings[:total] * annuity_factor
+    sav_j = savings_elec .* annuity_factor
+    sav_ev = size(savings[:ev], 2) > 0 ? sum(savings[:ev]) * annuity_factor : 0.0
+
+    # === FINAL NPV CALCULATION ===
+    # NPV = PV(savings) - PV(O&M) - PV(investments) + PV(residual value)
+    npv_rec = sav_rec - om_rec - (inv_rec + replacement_inv) + residual_bess
+    npv_j = sav_j .- om_j .- (inv_j .+ replacement_inv_j) .+ residual_bess .* shares_j
+    npv_ev = sav_ev - om_ev - inv_ev
+
     return npv_rec, npv_j, npv_ev
 end
 
@@ -657,50 +729,53 @@ function calculate_npv(cashflows, discount_rate)
     return npv
 end
 
-function calculate_irr_detailed(investments, operation_costs, savings, energy_shares, params)
+function calculate_irr_detailed(investments, operation_costs, savings, energy_shares, params, bess_usage)
     # Calculate cash flows for REC, households, and EVs
     N = params.N
     shares_j = vec(energy_shares[:j])
     J = length(shares_j)
     savings_elec = vec(savings[:elec])
 
+    # Extract BESS usage metrics
+    bess_life = bess_usage.life
+    bess_cycles_yr = bess_usage.cycles_yr
+    bess_total_cycles = bess_usage.total_cycles
+
     # Initialize cash flow arrays
     cf_rec = zeros(N+1)
     cf_j = zeros(N+1, J)
     cf_ev = zeros(N+1)
-    
+
     # Initial investment (year 0)
-    cf_rec[1] = -investments[:total]
-    cf_j[1, :] = -(investments[:pv] + investments[:inv] + investments[:bess]) .*
+    # MATLAB compatibility: inverter NOT included in year 0 (CV2 lines 324-326)
+    cf_rec[1] = -investments[:total]  # Already excludes inverter
+    cf_j[1, :] = -(investments[:pv] + investments[:bess]) .*
                  shares_j .- investments[:ashp] / J .- investments[:dhw] / J
     cf_ev[1] = -investments[:ev]
     
-    # BESS lifetime calculation
-    bess_life = N
-    if investments[:bess] > 0
-        # Simplified calculation: assume BESS lasts 10 years
-        bess_life = 10
-    end
-    
     # Years 1 to N: Annual cash flows
+    # Note: Replacements only occur if there's time to use the new equipment (n < N)
     for n = 1:N
         # Year n cash flow is at index n+1
-        if mod(n, bess_life) == 0 && mod(n, params.INV_life) == 0
+        replace_bess = (investments[:bess] > 0) && (mod(n, bess_life) == 0) && (n < N)
+        replace_inv = (mod(n, params.INV_life) == 0) && (n < N)
+
+        if replace_bess && replace_inv
             # Replace both BESS and inverter
-            cf_rec[n+1] = savings[:total] - operation_costs[:total] - 
+            cf_rec[n+1] = savings[:total] - operation_costs[:total] -
                          (investments[:bess] + investments[:inv])
             cf_j[n+1, :] = savings_elec -
                           (operation_costs[:pv] + operation_costs[:bess]) .* shares_j .-
                           operation_costs[:ashp] / J .- operation_costs[:dhw] / J .-
                           (investments[:bess] + investments[:inv]) .* shares_j
-        elseif mod(n, bess_life) == 0
+        elseif replace_bess
             # Replace only BESS
             cf_rec[n+1] = savings[:total] - operation_costs[:total] - investments[:bess]
             cf_j[n+1, :] = savings_elec -
                           (operation_costs[:pv] + operation_costs[:bess]) .* shares_j .-
                           operation_costs[:ashp] / J .- operation_costs[:dhw] / J .-
                           investments[:bess] .* shares_j
-        elseif mod(n, params.INV_life) == 0
+        elseif replace_inv
             # Replace only inverter
             cf_rec[n+1] = savings[:total] - operation_costs[:total] - investments[:inv]
             cf_j[n+1, :] = savings_elec -
@@ -721,12 +796,15 @@ function calculate_irr_detailed(investments, operation_costs, savings, energy_sh
     end
     
     # Calculate BESS residual value at end of project
-    residual_bess = 0
-    if investments[:bess] > 0
-        # Simplified residual value calculation
-        replace_bess = floor(N/bess_life) * bess_life
-        if replace_bess < N
-            residual_bess = investments[:bess] * (1 - (N - replace_bess) / bess_life)
+    # Uses cycle-based formula matching MATLAB original
+    residual_bess = 0.0
+    if investments[:bess] > 0 && bess_total_cycles > 0
+        last_replacement = floor(Int, N / bess_life) * bess_life
+        years_since_replacement = N - last_replacement
+        if years_since_replacement > 0 && years_since_replacement < bess_life
+            # Cycle-based residual value (faithful to MATLAB design)
+            cycles_used_since_replacement = bess_cycles_yr * years_since_replacement
+            residual_bess = investments[:bess] * (1 - cycles_used_since_replacement / bess_total_cycles)
         end
     end
     
